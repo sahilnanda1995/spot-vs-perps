@@ -66,6 +66,39 @@ def fetch_staking_data(mint_address: str, limit: int = 168) -> Optional[Dict]:
         st.error("Error parsing API response")
         return None
 
+def fetch_rates_data(bank_address: str, protocol: str, limit: int = 168) -> Optional[Dict]:
+    """
+    Fetch lending and borrowing rates data for a given bank address and protocol
+
+    Args:
+        bank_address (str): The bank address
+        protocol (str): The protocol name
+        limit (int): Number of hours of data to fetch (default: 168 = 1 week)
+
+    Returns:
+        Dict: API response data or None if error
+    """
+    url_config = load_url_config()
+    base_url = url_config.get('spot_rates_hourly_base_url')
+
+    if not base_url:
+        st.error("Rates URL not configured")
+        return None
+
+    # Construct API URL with parameters
+    api_url = f"{base_url}/{bank_address}/{protocol}?limit={limit}"
+
+    try:
+        response = requests.get(api_url, timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error fetching rates data: {str(e)}")
+        return None
+    except json.JSONDecodeError:
+        st.error("Error parsing API response")
+        return None
+
 def plot_staking_apy_chart(data: Dict, token_symbol: str) -> Optional[go.Figure]:
     """
     Create a line chart for staking APY data
@@ -123,6 +156,92 @@ def plot_staking_apy_chart(data: Dict, token_symbol: str) -> Optional[go.Figure]
         template='plotly_white',
         height=500,
         showlegend=True
+    )
+
+    # Format y-axis to show percentage with 4 decimal places
+    fig.update_yaxes(tickformat='.4f')
+
+    return fig
+
+def plot_lending_borrowing_rates_chart(data: Dict, token_symbol: str, protocol: str) -> Optional[go.Figure]:
+    """
+    Create a line chart for lending and borrowing rates data
+
+    Args:
+        data (Dict): API response data
+        token_symbol (str): Token symbol for chart title
+        protocol (str): Protocol name for chart title
+
+    Returns:
+        plotly.graph_objects.Figure: Chart figure or None if error
+    """
+    if not data or not data.get('success'):
+        st.error("No valid data to plot")
+        return None
+
+    records = data.get('data', {}).get('records', [])
+
+    if not records:
+        st.error("No records found in data")
+        return None
+
+    # Convert records to DataFrame
+    df = pd.DataFrame(records)
+
+    # Convert hourBucket to datetime and sort by time
+    df['hourBucket'] = pd.to_datetime(df['hourBucket'])
+    df = df.sort_values('hourBucket')
+
+    # Convert rates to percentage
+    df['avgLendingRate_percent'] = df['avgLendingRate'] * 100
+    df['avgBorrowingRate_percent'] = df['avgBorrowingRate'] * 100
+
+    # Create the line chart with both rates
+    fig = go.Figure()
+
+    # Add lending rate trace
+    fig.add_trace(go.Scatter(
+        x=df['hourBucket'],
+        y=df['avgLendingRate_percent'],
+        mode='lines+markers',
+        name=f'Lending Rate',
+        line=dict(color='#2E8B57', width=2),  # Sea green
+        marker=dict(size=4),
+        hovertemplate='<b>Lending Rate</b><br>' +
+                      'Time: %{x}<br>' +
+                      'Rate: %{y:.4f}%<br>' +
+                      '<extra></extra>'
+    ))
+
+    # Add borrowing rate trace
+    fig.add_trace(go.Scatter(
+        x=df['hourBucket'],
+        y=df['avgBorrowingRate_percent'],
+        mode='lines+markers',
+        name=f'Borrowing Rate',
+        line=dict(color='#DC143C', width=2),  # Crimson
+        marker=dict(size=4),
+        hovertemplate='<b>Borrowing Rate</b><br>' +
+                      'Time: %{x}<br>' +
+                      'Rate: %{y:.4f}%<br>' +
+                      '<extra></extra>'
+    ))
+
+    # Update layout
+    fig.update_layout(
+        title=f'{token_symbol} Lending & Borrowing Rates - {protocol.title()}',
+        xaxis_title='Time',
+        yaxis_title='Rate (%)',
+        hovermode='x unified',
+        template='plotly_white',
+        height=500,
+        showlegend=True,
+        legend=dict(
+            yanchor="top",
+            y=0.99,
+            xanchor="left",
+            x=0.01
+        )
     )
 
     # Format y-axis to show percentage with 4 decimal places
@@ -217,6 +336,136 @@ if token_config:
                         # Show raw data (optional)
                         with st.expander("View Raw Data"):
                             st.dataframe(df[['hourBucket', 'avgApy_percent', 'sampleCount']], use_container_width=True)
+
+    # Lending & Borrowing Rates Section
+    st.divider()
+    st.subheader("💰 Lending & Borrowing Rates")
+    st.write("Select a token and protocol to view historical lending and borrowing rates.")
+
+    # Token and protocol selection
+    col1, col2, col3 = st.columns([2, 1, 1])
+
+    with col1:
+        # Get all tokens that have banks (lending/borrowing data)
+        tokens_with_banks = [token for token, config in token_config.items()
+                           if config.get('banks', [])]
+
+        if not tokens_with_banks:
+            st.warning("No tokens with lending/borrowing data found in configuration.")
+            selected_rates_token = None
+        else:
+            selected_rates_token = st.selectbox(
+                "Choose a token:",
+                options=tokens_with_banks,
+                index=0,
+                key="rates_token_select"
+            )
+
+    with col2:
+        if selected_rates_token:
+            token_banks = token_config[selected_rates_token].get('banks', [])
+            protocols = list(set([bank['protocol'] for bank in token_banks]))
+
+            selected_protocol = st.selectbox(
+                "Protocol:",
+                options=protocols,
+                index=0,
+                key="rates_protocol_select"
+            )
+        else:
+            selected_protocol = None
+
+    with col3:
+        rates_time_period = st.selectbox(
+            "Time period:",
+            options=[
+                ("1 Month", 720),
+                ("15 Days", 360),
+                ("1 Week", 168),
+                ("3 Days", 72),
+                ("1 Day", 24),
+                ("12 Hours", 12)
+            ],
+            format_func=lambda x: x[0],
+            index=2,
+            key="rates_time_period_select"
+        )
+
+    # Market selection based on selected token and protocol
+    if selected_rates_token and selected_protocol:
+        token_banks = token_config[selected_rates_token].get('banks', [])
+        protocol_banks = [bank for bank in token_banks if bank['protocol'] == selected_protocol]
+
+        if protocol_banks:
+            if len(protocol_banks) > 1:
+                col1, col2 = st.columns([2, 2])
+                with col1:
+                    selected_market = st.selectbox(
+                        "Market:",
+                        options=protocol_banks,
+                        format_func=lambda x: x['market'],
+                        index=0,
+                        key="rates_market_select"
+                    )
+            else:
+                selected_market = protocol_banks[0]
+                st.info(f"Market: {selected_market['market']}")
+
+            if st.button("Fetch Rates Data", type="primary", key="fetch_rates_btn"):
+                bank_address = selected_market['bank']
+
+                with st.spinner(f"Fetching {selected_rates_token} rates data from {selected_protocol}..."):
+                    # Fetch rates data
+                    rates_data = fetch_rates_data(bank_address, selected_protocol, limit=rates_time_period[1])
+
+                    if rates_data:
+                        # Plot chart
+                        fig = plot_lending_borrowing_rates_chart(rates_data, selected_rates_token, selected_protocol)
+
+                        if fig:
+                            st.plotly_chart(fig, use_container_width=True)
+
+                            # Show some basic statistics
+                            records = rates_data.get('data', {}).get('records', [])
+                            if records:
+                                df = pd.DataFrame(records)
+                                df['avgLendingRate_percent'] = df['avgLendingRate'] * 100
+                                df['avgBorrowingRate_percent'] = df['avgBorrowingRate'] * 100
+
+                                col1, col2, col3, col4 = st.columns(4)
+
+                                with col1:
+                                    st.metric("Current Lending Rate", f"{df['avgLendingRate_percent'].iloc[0]:.4f}%")
+
+                                with col2:
+                                    st.metric("Current Borrowing Rate", f"{df['avgBorrowingRate_percent'].iloc[0]:.4f}%")
+
+                                with col3:
+                                    st.metric("Avg Lending Rate", f"{df['avgLendingRate_percent'].mean():.4f}%")
+
+                                with col4:
+                                    st.metric("Avg Borrowing Rate", f"{df['avgBorrowingRate_percent'].mean():.4f}%")
+
+                                # Show additional metrics
+                                col1, col2, col3, col4 = st.columns(4)
+
+                                with col1:
+                                    st.metric("Min Lending Rate", f"{df['avgLendingRate_percent'].min():.4f}%")
+
+                                with col2:
+                                    st.metric("Max Lending Rate", f"{df['avgLendingRate_percent'].max():.4f}%")
+
+                                with col3:
+                                    st.metric("Min Borrowing Rate", f"{df['avgBorrowingRate_percent'].min():.4f}%")
+
+                                with col4:
+                                    st.metric("Max Borrowing Rate", f"{df['avgBorrowingRate_percent'].max():.4f}%")
+
+                                # Show raw data (optional)
+                                with st.expander("View Raw Data"):
+                                    display_df = df[['hourBucket', 'avgLendingRate_percent', 'avgBorrowingRate_percent', 'sampleCount']].copy()
+                                    display_df.columns = ['Time', 'Lending Rate (%)', 'Borrowing Rate (%)', 'Sample Count']
+                                    st.dataframe(display_df, use_container_width=True)
 
 st.subheader("Spot")
 st.write("Spot is a contract for difference (CFD) that allows you to trade the underlying asset directly.")
