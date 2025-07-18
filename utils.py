@@ -11,8 +11,8 @@ STRATEGY_CONFIG = {
         'token_a': 'JitoSOL',  # Long position token
         'token_b': 'USDC',     # Short position token
         'fee_structure': {
-            'opening_rate': 0.001,  # 0.1%
-            'closing_rate': 0.001   # 0.1%
+            'opening_rate': 0.0005,  # 0.05%
+            'closing_rate': 0.0005   # 0.05%
         }
     }
 }

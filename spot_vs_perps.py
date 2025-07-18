@@ -555,8 +555,8 @@ if token_config:
         principal_amount = st.number_input(
             "Principal Amount ($):",
             min_value=100.0,
-            max_value=100000.0,
-            value=1000.0,
+            max_value=10000000.0,
+            value=100000.0,
             step=100.0,
             key="sol_principal_amount"
         )
