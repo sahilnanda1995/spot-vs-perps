@@ -146,6 +146,11 @@
     "hasStakingYield": false,
     "banks": [
       {
+        "protocol": "marginfi",
+        "market": "Main Market",
+        "bank": "2s37akK2eyBbp8DZgCm7RtsaEz8eJP3Nxd4urLHQv7yB"
+      },
+      {
         "protocol": "kamino",
         "market": "Isolated JLP Market",
         "bank": "Ga4rZytCpq1unD4DbEJ5bkHeUz9g3oh9AAFEi6vSauXp"

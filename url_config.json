@@ -1,4 +1,5 @@
 {
   "staking_apy_hourly_base_url": "https://historical-apy.asgard.finance/staking/hourly-data",
-  "spot_rates_hourly_base_url": "https://historical-apy.asgard.finance/rates/hourly-data"
+  "spot_rates_hourly_base_url": "https://historical-apy.asgard.finance/rates/hourly-data",
+  "jupiter_perpetuals_hourly_base_url": "https://historical-apy.asgard.finance/jupiter-perpetuals/hourly-data"
 }
