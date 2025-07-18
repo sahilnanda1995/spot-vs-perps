@@ -39,11 +39,6 @@
       {
         "protocol": "drift",
         "market": "Main Market",
-        "bank": "49"
-      },
-      {
-        "protocol": "drift",
-        "market": "Main Market",
         "bank": "1"
       },
       {
@@ -72,16 +67,6 @@
         "protocol": "kamino",
         "market": "Jito 10x Market",
         "bank": "F9HdecRG8GPs9LEn4S5VfeJVEZVqrDJFR6bvmQTi22na"
-      },
-      {
-        "protocol": "drift",
-        "market": "Main Market",
-        "bank": "50"
-      },
-      {
-        "protocol": "drift",
-        "market": "Main Market",
-        "bank": "6"
       }
     ]
   },
