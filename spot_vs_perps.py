@@ -10,7 +10,7 @@ from utils import (
     STRATEGY_CONFIG, CHART_COLORS, HOURS_PER_YEAR,
     discover_token_pair_markets, get_token_overall_apy,
     load_token_config, load_url_config,
-    fetch_staking_data, fetch_rates_data, fetch_jupiter_perps_data,
+    fetch_staking_data, fetch_rates_data, fetch_jupiter_perps_data, fetch_drift_perps_data,
     plot_staking_apy_chart, plot_lending_borrowing_rates_chart,
     plot_jupiter_perps_borrow_rates_chart, fetch_strategy_data,
     calculate_net_apy, plot_strategy_chart
@@ -52,6 +52,71 @@ def calculate_sol_fees(jupiter_perps_data: Dict, principal_amount: float, levera
     df['hourly_borrow_rate_percent'] = df['avgHourlyBorrowRate']
     df['hourly_borrow_cost'] = (df['hourly_borrow_rate_percent'] / 100) * position_size
     df['daily_borrow_cost'] = df['hourly_borrow_cost'] * 24
+
+    # Add metadata
+    df['principal_amount'] = principal_amount
+    df['leverage'] = leverage
+    df['position_size'] = position_size
+
+    return df
+
+def calculate_drift_fees(drift_perps_data: Dict, principal_amount: float, leverage: float, time_period_hours: int) -> Optional[pd.DataFrame]:
+    """
+    Calculate fees for leveraged SOL trading on Drift Perpetuals
+
+    Args:
+        drift_perps_data (Dict): API response data for Drift Perps
+        principal_amount (float): The principal amount in USD
+        leverage (float): The leverage multiplier
+        time_period_hours (int): Number of hours of data to include
+
+    Returns:
+        pd.DataFrame: DataFrame with fee calculations over time
+    """
+    if not drift_perps_data or drift_perps_data.get('status') != 'ok':
+        st.error("No valid Drift Perps data to calculate fees")
+        return None
+
+    funding_rates = drift_perps_data.get('fundingRates', [])
+
+    if not funding_rates:
+        st.error("No funding rate records found in Drift Perps data")
+        return None
+
+    # Convert records to DataFrame
+    df = pd.DataFrame(funding_rates)
+
+    # Convert timestamp to datetime and sort by time
+    df['hourBucket'] = pd.to_datetime(df['ts'], unit='s')
+    df = df.sort_values('hourBucket')
+
+    # Filter data to match the exact time period requested
+    if len(df) > 0:
+        # Calculate the time cutoff based on the requested time period
+        latest_time = df['hourBucket'].max()
+        time_cutoff = latest_time - pd.Timedelta(hours=time_period_hours)
+
+        # Filter to only include data within the requested time period
+        df = df[df['hourBucket'] >= time_cutoff]
+
+        # If we still have too many records, take the most recent ones
+        if len(df) > time_period_hours * 2:  # Allow some buffer for irregular intervals
+            df = df.tail(time_period_hours * 2)
+
+    # Convert string fields to numeric types
+    df['fundingRate'] = pd.to_numeric(df['fundingRate'], errors='coerce')
+    df['oraclePriceTwap'] = pd.to_numeric(df['oraclePriceTwap'], errors='coerce')
+
+    # Calculate position size
+    position_size = principal_amount * leverage
+
+    # Calculate funding rate hourly percentage
+    # Formula: fundingRateHourlyPct = (fundingRate / 1e9) / (oraclePriceTwap / 1e6) * 100
+    df['hourly_funding_rate_percent'] = (df['fundingRate'] / 1e9) / (df['oraclePriceTwap'] / 1e6) * 100
+
+    # Calculate hourly costs based on position size
+    df['hourly_funding_cost'] = (df['hourly_funding_rate_percent'] / 100) * position_size
+    df['daily_funding_cost'] = df['hourly_funding_cost'] * 24
 
     # Add metadata
     df['principal_amount'] = principal_amount
@@ -341,14 +406,16 @@ def plot_combined_fee_rates_chart(sol_fees_df: pd.DataFrame, asgard_strategy_df:
 
 def plot_multi_strategy_comparison_chart(
     jupiter_data: Optional[pd.DataFrame],
+    drift_data: Optional[pd.DataFrame],
     asgard_markets_fees: Dict,
     leverage: float
 ) -> Optional[go.Figure]:
     """
-    Create a chart showing Jupiter Perps and all Asgard markets on the same hourly rate scale
+    Create a chart showing Jupiter Perps, Drift Perps, and all Asgard markets on the same hourly rate scale
 
     Args:
         jupiter_data (Optional[pd.DataFrame]): Jupiter Perps fee data
+        drift_data (Optional[pd.DataFrame]): Drift Perps fee data
         asgard_markets_fees (Dict): Fee calculations for all Asgard markets
         leverage (float): Leverage multiplier
 
@@ -372,8 +439,23 @@ def plot_multi_strategy_comparison_chart(
                           '<extra></extra>'
         ))
 
+    # Add Drift Perps trace if available
+    if drift_data is not None and not drift_data.empty:
+        fig.add_trace(go.Scatter(
+            x=drift_data['hourBucket'],
+            y=drift_data['hourly_funding_rate_percent'],
+            mode='lines+markers',
+            name='Drift Perps (SOL)',
+            line=dict(color=CHART_COLORS[1], width=2),  # Green
+            marker=dict(size=4),
+            hovertemplate='<b>Drift Perps</b><br>' +
+                          'Time: %{x}<br>' +
+                          'Hourly Rate: %{y:.6f}%<br>' +
+                          '<extra></extra>'
+        ))
+
     # Add Asgard market traces
-    color_index = 1
+    color_index = 2  # Start from index 2 since 0=Jupiter, 1=Drift
     for market_key, market_fees in asgard_markets_fees.items():
         if market_fees.get('strategy_df') is not None and not market_fees['strategy_df'].empty:
             strategy_df = market_fees['strategy_df']
@@ -403,13 +485,19 @@ def plot_multi_strategy_comparison_chart(
 
     # Determine chart title
     jupiter_available = jupiter_data is not None and not jupiter_data.empty
+    drift_available = drift_data is not None and not drift_data.empty
     asgard_count = len([k for k, v in asgard_markets_fees.items()
                       if v.get('strategy_df') is not None and not v['strategy_df'].empty])
 
-    if jupiter_available and asgard_count > 0:
+    perps_count = sum([jupiter_available, drift_available])
+    total_strategies = perps_count + asgard_count
+
+    if total_strategies > 1:
         title = 'Multi-Strategy Hourly Rates Comparison'
     elif jupiter_available:
         title = 'Jupiter Perps - Hourly Borrow Rates'
+    elif drift_available:
+        title = 'Drift Perps - Hourly Funding Rates'
     elif asgard_count > 0:
         title = 'Asgard Strategies - Equivalent Hourly Rates'
     else:
@@ -487,15 +575,16 @@ if token_config:
         sol_fee_time_period = st.selectbox(
             "Time period:",
             options=[
-                ("1 Month", 720),
-                ("15 Days", 360),
-                ("1 Week", 168),
-                ("3 Days", 72),
-                ("1 Day", 24),
-                ("12 Hours", 12)
+                ("Last 30 Days", 720),
+                ("Last 15 Days", 360),
+                ("Last 7 Days", 168),
+                ("Last 5 Days", 120),
+                ("Last 3 Days", 72),
+                ("Last Day", 24),
+                ("Last 12 Hours", 12)
             ],
             format_func=lambda x: x[0],
-            index=2,
+            index=3,
             key="sol_fee_time_period"
         )
 
@@ -512,19 +601,30 @@ if token_config:
         st.metric("Position Size", f"${position_size:,.2f}")
 
     if st.button("Analyze SOL Fees", type="primary", key="analyze_sol_fees_btn"):
-        with st.spinner("Fetching fee data and calculating costs for both positions..."):
+        with st.spinner("Fetching fee data and calculating costs for all platforms..."):
+            time_period_hours = sol_fee_time_period[1]
+
+                        # Calculate timestamps for Drift API (round to 3 decimal places)
+            from datetime import datetime
+            end_time = round(datetime.now().timestamp(), 3)
+            start_time = round(end_time - (time_period_hours * 3600), 3)
+
             # Fetch Jupiter perps data for SOL
-            jupiter_perps_data = fetch_jupiter_perps_data("SOL", limit=sol_fee_time_period[1])
+            jupiter_perps_data = fetch_jupiter_perps_data("SOL", limit=time_period_hours)
+
+            # Fetch Drift perps data for SOL (market index 0)
+            drift_perps_data = fetch_drift_perps_data(0, start_time, end_time)
 
             # Fetch Asgard strategy data
-            asgard_data = fetch_all_asgard_markets_data(principal_amount, sol_leverage, limit=sol_fee_time_period[1])
+            asgard_data = fetch_all_asgard_markets_data(principal_amount, sol_leverage, limit=time_period_hours)
 
             jupiter_success = jupiter_perps_data is not None
+            drift_success = drift_perps_data is not None
             asgard_success = asgard_data and len(asgard_data) > 0  # Check if we have any market data
-            time_period_hours = sol_fee_time_period[1]  # Define this early for use in calculations
 
-            if jupiter_success or asgard_success:
+            if jupiter_success or drift_success or asgard_success:
                 jupiter_fees_calculated = False
+                drift_fees_calculated = False
                 asgard_fees_calculated = False
 
                 # Calculate Jupiter Perps fees if data available
@@ -533,16 +633,23 @@ if token_config:
                     if sol_fees_df is not None and not sol_fees_df.empty:
                         jupiter_fees_calculated = True
 
+                # Calculate Drift Perps fees if data available
+                if drift_success:
+                    drift_fees_df = calculate_drift_fees(drift_perps_data, principal_amount, sol_leverage, time_period_hours)
+                    if drift_fees_df is not None and not drift_fees_df.empty:
+                        drift_fees_calculated = True
+
                 # Calculate Asgard fees if data available
                 if asgard_success:
-                    asgard_fees = calculate_multi_market_fees(asgard_data, principal_amount, sol_leverage, sol_fee_time_period[1])
+                    asgard_fees = calculate_multi_market_fees(asgard_data, principal_amount, sol_leverage, time_period_hours)
                     if asgard_fees:
                         asgard_fees_calculated = True
 
-                if jupiter_fees_calculated or asgard_fees_calculated:
+                if jupiter_fees_calculated or drift_fees_calculated or asgard_fees_calculated:
                     # Plot multi-strategy comparison chart
                     fig = plot_multi_strategy_comparison_chart(
                         sol_fees_df if jupiter_fees_calculated else None,
+                        drift_fees_df if drift_fees_calculated else None,
                         asgard_fees if asgard_fees_calculated else {},
                         sol_leverage
                     )
@@ -572,6 +679,20 @@ if token_config:
                         variable_fees.append(f"${jupiter_variable_fees:.2f}")
                         close_fees.append(f"${jupiter_closing_fee:.2f}")
                         total_fees.append(f"${jupiter_total_fees:.2f}")
+
+                    # Drift Perps calculations (if available)
+                    if drift_fees_calculated:
+                        drift_opening_fee = position_size * 0.00025  # 0.0250%
+                        drift_closing_fee = position_size * 0.00025  # 0.0250%
+                        avg_funding_rate = drift_fees_df['hourly_funding_rate_percent'].mean()
+                        drift_variable_fees = (avg_funding_rate / 100) * position_size * time_period_hours
+                        drift_total_fees = drift_opening_fee + drift_closing_fee + drift_variable_fees
+
+                        positions.append("Drift Perps (SOL)")
+                        opening_fees.append(f"${drift_opening_fee:.2f}")
+                        variable_fees.append(f"${drift_variable_fees:.2f}")
+                        close_fees.append(f"${drift_closing_fee:.2f}")
+                        total_fees.append(f"${drift_total_fees:.2f}")
 
                     # Asgard calculations (if available)
                     if asgard_fees_calculated:
@@ -619,9 +740,32 @@ if token_config:
 **Jupiter Perps Total: ${jupiter_total_fees:.2f}**
 """
 
+                        if drift_fees_calculated:
+                            if jupiter_fees_calculated:
+                                calculation_details += "\n---\n"
+
+                            calculation_details += f"""
+## Drift Perps (SOL) Calculations:
+
+**Fixed Fees:**
+- Opening Fee = Position Size × 0.0250% = ${position_size:,.2f} × 0.00025 = ${drift_opening_fee:.2f}
+- Closing Fee = Position Size × 0.0250% = ${position_size:,.2f} × 0.00025 = ${drift_closing_fee:.2f}
+- Total Fixed Fees = ${drift_opening_fee + drift_closing_fee:.2f}
+
+**Variable Fees (Funding):**
+- Funding Rate Formula: (fundingRate / 1e9) / (oraclePriceTwap / 1e6) × 100
+- Average Hourly Funding Rate = {avg_funding_rate:.6f}% per hour
+- Time Period = {time_period_hours} hours ({sol_fee_time_period[0]})
+- Total Variable Fees = Position Size × Avg Rate × Hours
+- Total Variable Fees = ${position_size:,.2f} × {avg_funding_rate:.6f}% × {time_period_hours} = ${drift_variable_fees:.2f}
+
+**Drift Perps Total: ${drift_total_fees:.2f}**
+**Note: Funding rates can be negative (profitable) or positive (cost)**
+"""
+
                         if asgard_fees_calculated:
                             for market_key, market_fees in asgard_fees.items():
-                                if jupiter_fees_calculated:
+                                if jupiter_fees_calculated or drift_fees_calculated:
                                     calculation_details += "\n---\n"
 
                                 metadata = market_fees['metadata']
@@ -659,8 +803,9 @@ if token_config:
 
 **Key Differences:**
 - **Jupiter Perps**: Direct hourly borrow rate (always positive cost)
+- **Drift Perps**: Funding rate (can be positive cost or negative profit)
 - **Asgard**: Equivalent hourly rate from net APY (negative = profitable, positive = unprofitable)
-- **Chart**: All lines on same scale for direct comparison. Asgard below 0% means it's profitable!
+- **Chart**: All lines on same scale for direct comparison. Negative rates mean profitable strategies!
 """
 
                         st.markdown(calculation_details)
@@ -672,6 +817,17 @@ if token_config:
                                 'hourBucket', 'hourly_borrow_rate_percent', 'hourly_borrow_cost'
                             ]
                             display_df = sol_fees_df[display_columns].copy()
+                            display_df.columns = [
+                                'Time', 'Hourly Rate (%)', 'Hourly Cost ($)'
+                            ]
+                            st.dataframe(display_df, use_container_width=True)
+
+                    if drift_fees_calculated:
+                        with st.expander("View Raw Fee Data (Drift Perps)"):
+                            display_columns = [
+                                'hourBucket', 'hourly_funding_rate_percent', 'hourly_funding_cost'
+                            ]
+                            display_df = drift_fees_df[display_columns].copy()
                             display_df.columns = [
                                 'Time', 'Hourly Rate (%)', 'Hourly Cost ($)'
                             ]

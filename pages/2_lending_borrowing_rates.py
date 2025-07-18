@@ -54,15 +54,16 @@ if token_config:
         rates_time_period = st.selectbox(
             "Time period:",
             options=[
-                ("1 Month", 720),
-                ("15 Days", 360),
-                ("1 Week", 168),
-                ("3 Days", 72),
-                ("1 Day", 24),
-                ("12 Hours", 12)
+                ("Last 30 Days", 720),
+                ("Last 15 Days", 360),
+                ("Last 7 Days", 168),
+                ("Last 5 Days", 120),
+                ("Last 3 Days", 72),
+                ("Last Day", 24),
+                ("Last 12 Hours", 12)
             ],
             format_func=lambda x: x[0],
-            index=2,
+            index=3,
             key="rates_time_period_select"
         )
 

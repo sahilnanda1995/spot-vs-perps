@@ -12,7 +12,7 @@ STRATEGY_CONFIG = {
         'token_b': 'USDC',     # Short position token
         'fee_structure': {
             'opening_rate': 0.001,  # 0.1%
-            'closing_rate': 0.0     # 0%
+            'closing_rate': 0.001   # 0.1%
         }
     }
 }
@@ -202,6 +202,60 @@ def fetch_jupiter_perps_data(token_symbol: str, limit: int = 168) -> Optional[Di
         return None
     except json.JSONDecodeError:
         st.error("Error parsing API response")
+        return None
+
+def fetch_drift_perps_data(market_index: int, from_timestamp: float, to_timestamp: float) -> Optional[Dict]:
+    """
+    Fetch Drift perpetuals funding rates data for a given market
+
+    Args:
+        market_index (int): Market index (0=SOL, 1=BTC, 2=ETH)
+        from_timestamp (float): Unix timestamp start
+        to_timestamp (float): Unix timestamp end
+
+    Returns:
+        Dict: API response data or None if error
+    """
+    url_config = load_url_config()
+    base_url = url_config.get('drift_perpetuals_base_url')
+
+    if not base_url:
+        st.error("Drift perpetuals URL not configured")
+        return None
+
+    # Construct API URL with parameters
+    api_url = f"{base_url}?marketIndex={market_index}&from={from_timestamp}&to={to_timestamp}"
+
+        # Set headers to mimic a browser request from app.drift.trade
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': 'https://app.drift.trade/',
+        'Origin': 'https://app.drift.trade',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-site'
+    }
+
+    try:
+        response = requests.get(api_url, headers=headers, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+
+        # Validate response structure
+        if data.get('status') != 'ok':
+            st.error("Invalid response from Drift API")
+            return None
+
+        return data
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error fetching Drift perps data: {str(e)}")
+        return None
+    except json.JSONDecodeError:
+        st.error("Error parsing Drift API response")
         return None
 
 def plot_staking_apy_chart(data: Dict, token_symbol: str) -> Optional[go.Figure]:
