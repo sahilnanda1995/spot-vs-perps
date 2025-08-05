@@ -95,7 +95,7 @@ def calculate_drift_fees(drift_perps_data: Dict, principal_amount: float, levera
     df = pd.DataFrame(funding_rates)
 
     # Convert timestamp to datetime and sort by time
-    df['hourBucket'] = pd.to_datetime(df['ts'], unit='s')
+    df['hourBucket'] = pd.to_datetime(pd.to_numeric(df['ts'], errors='coerce'), unit='s')
     df = df.sort_values('hourBucket')
 
     # Filter data to match the exact time period requested
