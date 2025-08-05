@@ -16,7 +16,7 @@ from utils import (
     calculate_net_apy, plot_strategy_chart
 )
 
-def calculate_sol_fees(jupiter_perps_data: Dict, principal_amount: float, leverage: float) -> Optional[pd.DataFrame]:
+def calculate_sol_fees(jupiter_perps_data: Dict, principal_amount: float, leverage: float, time_period_hours: int) -> Optional[pd.DataFrame]:
     """
     Calculate fees for leveraged SOL trading on Jupiter Perpetuals
 
@@ -24,6 +24,7 @@ def calculate_sol_fees(jupiter_perps_data: Dict, principal_amount: float, levera
         jupiter_perps_data (Dict): API response data for Jupiter Perps SOL
         principal_amount (float): The principal amount in USD
         leverage (float): The leverage multiplier
+        time_period_hours (int): Number of hours of data to include
 
     Returns:
         pd.DataFrame: DataFrame with fee calculations over time
@@ -44,6 +45,13 @@ def calculate_sol_fees(jupiter_perps_data: Dict, principal_amount: float, levera
     # Convert hourBucket to datetime and sort by time
     df['hourBucket'] = pd.to_datetime(df['hourBucket'])
     df = df.sort_values('hourBucket')
+
+    # Filter data to match the exact time period requested
+    from utils import filter_dataframe_by_time_window
+    df = filter_dataframe_by_time_window(df, time_period_hours, 'hourBucket')
+
+    if df.empty:
+        return None
 
     # Calculate position size
     position_size = principal_amount * leverage
@@ -219,13 +227,14 @@ def fetch_all_asgard_markets_data(principal_amount: float, leverage: float, limi
         st.error(f"Error fetching multi-market data: {str(e)}")
         return {}
 
-def calculate_token_pair_strategy_apy(market_data: Dict, leverage: float) -> Optional[pd.DataFrame]:
+def calculate_token_pair_strategy_apy(market_data: Dict, leverage: float, time_period_hours: Optional[int] = None) -> Optional[pd.DataFrame]:
     """
     Calculate strategy APY for a token pair market
 
     Args:
         market_data (Dict): Market data including rates and staking
         leverage (float): Leverage multiplier
+        time_period_hours (Optional[int]): Number of hours to filter data
 
     Returns:
         pd.DataFrame: Strategy calculation results
@@ -250,7 +259,8 @@ def calculate_token_pair_strategy_apy(market_data: Dict, leverage: float) -> Opt
             strategy_data,
             leverage,
             metadata['token_a_symbol'],
-            metadata['token_b_symbol']
+            metadata['token_b_symbol'],
+            time_period_hours
         )
 
     except Exception as e:
@@ -277,7 +287,7 @@ def calculate_multi_market_fees(markets_data: Dict, principal_amount: float, lev
     for market_key, market_data in markets_data.items():
         try:
             # Calculate strategy APY
-            strategy_df = calculate_token_pair_strategy_apy(market_data, leverage)
+            strategy_df = calculate_token_pair_strategy_apy(market_data, leverage, time_period_hours)
 
             if strategy_df is None or strategy_df.empty:
                 continue
@@ -600,7 +610,36 @@ if token_config:
     with col3:
         st.metric("Position Size", f"${position_size:,.2f}")
 
-    if st.button("Analyze SOL Fees", type="primary", key="analyze_sol_fees_btn"):
+    # Auto-trigger analysis when parameters change
+    analysis_key = f"{principal_amount}_{sol_leverage}_{sol_fee_time_period[1]}"
+
+    # Initialize session state for tracking analysis
+    if "last_analysis_key" not in st.session_state:
+        st.session_state.last_analysis_key = None
+
+    # Check if parameters have changed or this is the first load
+    should_analyze = (
+        st.session_state.last_analysis_key != analysis_key or
+        st.session_state.last_analysis_key is None
+    )
+
+    if should_analyze:
+        st.session_state.last_analysis_key = analysis_key
+
+        # Add manual refresh option
+        col1, col2 = st.columns([1, 4])
+        with col1:
+            if st.button("🔄 Refresh Analysis", type="secondary", key="refresh_analysis_btn"):
+                st.session_state.last_analysis_key = None
+                st.session_state.force_refresh = True
+                st.rerun()
+        with col2:
+            st.caption("Analysis runs automatically when parameters change. Click refresh to update data manually.")
+
+    # Run analysis automatically or when requested
+    if should_analyze or st.session_state.get("force_refresh", False):
+        if st.session_state.get("force_refresh", False):
+            st.session_state.force_refresh = False
         with st.spinner("Fetching fee data and calculating costs for all platforms..."):
             time_period_hours = sol_fee_time_period[1]
 
@@ -629,7 +668,7 @@ if token_config:
 
                 # Calculate Jupiter Perps fees if data available
                 if jupiter_success:
-                    sol_fees_df = calculate_sol_fees(jupiter_perps_data, principal_amount, sol_leverage)
+                    sol_fees_df = calculate_sol_fees(jupiter_perps_data, principal_amount, sol_leverage, time_period_hours)
                     if sol_fees_df is not None and not sol_fees_df.empty:
                         jupiter_fees_calculated = True
 
@@ -656,7 +695,7 @@ if token_config:
                     if fig:
                         st.plotly_chart(fig, use_container_width=True)
 
-                    # Fees comparison table
+                                        # Fees comparison table
                     st.markdown("#### 📋 Fees Comparison")
 
                     # Initialize table data
@@ -801,6 +840,11 @@ if token_config:
 - Position Size: ${position_size:,.2f}
 - Time Period: {sol_fee_time_period[0]} ({time_period_hours} hours)
 
+**Data Consistency:**
+- All platforms now use the exact same time period: {sol_fee_time_period[0]}
+- Data is filtered to only include records within the selected time window
+- This ensures fair comparison across all platforms with consistent timeframes
+
 **Key Differences:**
 - **Jupiter Perps**: Direct hourly borrow rate (always positive cost)
 - **Drift Perps**: Funding rate (can be positive cost or negative profit)
@@ -849,5 +893,5 @@ if token_config:
                                         'Time', 'Net APY (%)', f'{metadata["token_a_symbol"]} APY (%)', f'{metadata["token_b_symbol"]} APY (%)'
                                     ]
                                     st.dataframe(display_df, use_container_width=True)
-                else:
-                    st.error("Failed to fetch or calculate fee data. Please check your token configuration and API connectivity.")
+            else:
+                st.error("Failed to fetch or calculate fee data. Please check your token configuration and API connectivity.")

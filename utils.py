@@ -4,6 +4,8 @@ import requests
 import plotly.graph_objects as go
 import json
 from typing import Dict, List, Optional, Tuple
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # Configuration constants for generic token pair system
 STRATEGY_CONFIG = {
@@ -19,6 +21,135 @@ STRATEGY_CONFIG = {
 
 CHART_COLORS = ['#FF6B35', '#2E8B57', '#1E90FF', '#8A2BE2']  # Orange, Green, Blue, Purple
 HOURS_PER_YEAR = 365 * 24
+
+# HTTP Session Manager for efficient connection pooling
+class HTTPSessionManager:
+    """Singleton session manager for efficient HTTP requests with connection pooling"""
+    _instance = None
+    _session = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(HTTPSessionManager, cls).__new__(cls)
+        return cls._instance
+
+    def get_session(self) -> requests.Session:
+        """Get or create HTTP session with optimized settings"""
+        if self._session is None:
+            self._session = requests.Session()
+
+            # Configure retry strategy
+            retry_strategy = Retry(
+                total=3,
+                backoff_factor=0.3,
+                status_forcelist=[429, 500, 502, 503, 504],
+                allowed_methods=["HEAD", "GET", "OPTIONS"]
+            )
+
+            # Configure adapters with connection pooling
+            adapter = HTTPAdapter(
+                max_retries=retry_strategy,
+                pool_connections=10,  # Number of connection pools
+                pool_maxsize=20,      # Max connections per pool
+                pool_block=False
+            )
+
+            self._session.mount("http://", adapter)
+            self._session.mount("https://", adapter)
+
+            # Set default timeout and headers
+            self._session.headers.update({
+                'User-Agent': 'Asgard-Finance-Dashboard/1.0'
+            })
+
+        return self._session
+
+    def close(self):
+        """Close the session"""
+        if self._session:
+            self._session.close()
+            self._session = None
+
+# Global session manager instance
+session_manager = HTTPSessionManager()
+
+def calculate_time_window(time_period_hours: int) -> Tuple[pd.Timestamp, pd.Timestamp]:
+    """
+    Calculate standardized time window for consistent data filtering
+
+    Args:
+        time_period_hours (int): Number of hours to look back from now
+
+    Returns:
+        Tuple[pd.Timestamp, pd.Timestamp]: (start_time, end_time) as pandas timestamps
+    """
+    from datetime import datetime
+    import pandas as pd
+
+    # Create timezone-aware timestamps in UTC to match API data
+    end_time = pd.Timestamp.now(tz='UTC')
+    start_time = end_time - pd.Timedelta(hours=time_period_hours)
+
+    return start_time, end_time
+
+def filter_dataframe_by_time_window(df: pd.DataFrame, time_period_hours: int, time_column: str = 'hourBucket') -> pd.DataFrame:
+    """
+    Filter DataFrame to only include records within the specified time window
+
+    Args:
+        df (pd.DataFrame): DataFrame to filter
+        time_period_hours (int): Number of hours to look back from now
+        time_column (str): Name of the timestamp column
+
+    Returns:
+        pd.DataFrame: Filtered DataFrame
+    """
+    if df.empty:
+        return df
+
+    # Create a copy to avoid modifying the original DataFrame
+    df = df.copy()
+
+    start_time, end_time = calculate_time_window(time_period_hours)
+
+    # Ensure time column exists
+    if time_column not in df.columns:
+        return df
+
+        # Ensure time column is datetime
+    if not pd.api.types.is_datetime64_any_dtype(df[time_column]):
+        try:
+            df[time_column] = pd.to_datetime(df[time_column])
+        except Exception as e:
+            return df
+
+    # Ensure timezone compatibility
+    try:
+        # If the DataFrame column is timezone-aware, make sure start_time matches
+        if df[time_column].dt.tz is not None:
+            # DataFrame has timezone info, ensure start_time is also timezone-aware
+            if start_time.tz is None:
+                start_time = start_time.tz_localize('UTC')
+            else:
+                start_time = start_time.tz_convert('UTC')
+        else:
+            # DataFrame is timezone-naive, make start_time timezone-naive too
+            if start_time.tz is not None:
+                start_time = start_time.tz_localize(None)
+    except Exception as e:
+        # Fallback: convert both to timezone-naive
+        if hasattr(start_time, 'tz_localize'):
+            start_time = start_time.tz_localize(None) if start_time.tz is not None else start_time
+        if df[time_column].dt.tz is not None:
+            df[time_column] = df[time_column].dt.tz_localize(None)
+
+    # Filter to time window
+    filtered_df = df[df[time_column] >= start_time].copy()
+
+    # Sort by time to ensure consistent ordering
+    filtered_df = filtered_df.sort_values(time_column)
+
+    return filtered_df
 
 def discover_token_pair_markets(token_config: Dict, token_a: str, token_b: str) -> List[Dict]:
     """
@@ -129,14 +260,15 @@ def fetch_staking_data(mint_address: str, limit: int = 168) -> Optional[Dict]:
     api_url = f"{base_url}/{mint_address}?limit={limit}"
 
     try:
-        response = requests.get(api_url, timeout=10)
+        session = session_manager.get_session()
+        response = session.get(api_url, timeout=10)
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
-        st.error(f"Error fetching data: {str(e)}")
+        st.error(f"Error fetching staking data: {str(e)}")
         return None
     except json.JSONDecodeError:
-        st.error("Error parsing API response")
+        st.error("Error parsing staking API response")
         return None
 
 def fetch_rates_data(bank_address: str, protocol: str, limit: int = 168) -> Optional[Dict]:
@@ -162,14 +294,15 @@ def fetch_rates_data(bank_address: str, protocol: str, limit: int = 168) -> Opti
     api_url = f"{base_url}/{bank_address}/{protocol}?limit={limit}"
 
     try:
-        response = requests.get(api_url, timeout=10)
+        session = session_manager.get_session()
+        response = session.get(api_url, timeout=10)
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
         st.error(f"Error fetching rates data: {str(e)}")
         return None
     except json.JSONDecodeError:
-        st.error("Error parsing API response")
+        st.error("Error parsing rates API response")
         return None
 
 def fetch_jupiter_perps_data(token_symbol: str, limit: int = 168) -> Optional[Dict]:
@@ -194,14 +327,15 @@ def fetch_jupiter_perps_data(token_symbol: str, limit: int = 168) -> Optional[Di
     api_url = f"{base_url}/{token_symbol}?limit={limit}"
 
     try:
-        response = requests.get(api_url, timeout=10)
+        session = session_manager.get_session()
+        response = session.get(api_url, timeout=10)
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
         st.error(f"Error fetching Jupiter perps data: {str(e)}")
         return None
     except json.JSONDecodeError:
-        st.error("Error parsing API response")
+        st.error("Error parsing Jupiter API response")
         return None
 
 def fetch_drift_perps_data(market_index: int, from_timestamp: float, to_timestamp: float) -> Optional[Dict]:
@@ -241,7 +375,8 @@ def fetch_drift_perps_data(market_index: int, from_timestamp: float, to_timestam
     }
 
     try:
-        response = requests.get(api_url, headers=headers, timeout=10)
+        session = session_manager.get_session()
+        response = session.get(api_url, headers=headers, timeout=10)
         response.raise_for_status()
         data = response.json()
 
@@ -540,7 +675,7 @@ def fetch_strategy_data(long_token_info: Dict, short_token_info: Dict, long_bank
         st.error(f"Error fetching strategy data: {str(e)}")
         return None
 
-def calculate_net_apy(strategy_data: Dict, leverage: float, long_token_symbol: str, short_token_symbol: str) -> Optional[pd.DataFrame]:
+def calculate_net_apy(strategy_data: Dict, leverage: float, long_token_symbol: str, short_token_symbol: str, time_period_hours: Optional[int] = None) -> Optional[pd.DataFrame]:
     """
     Calculate net APY for the strategy over time
 
@@ -549,6 +684,7 @@ def calculate_net_apy(strategy_data: Dict, leverage: float, long_token_symbol: s
         leverage (float): Leverage amount
         long_token_symbol (str): Long token symbol
         short_token_symbol (str): Short token symbol
+        time_period_hours (Optional[int]): Number of hours to filter data (None = no filtering)
 
     Returns:
         pd.DataFrame: DataFrame with net APY calculations or None if error
@@ -625,6 +761,13 @@ def calculate_net_apy(strategy_data: Dict, leverage: float, long_token_symbol: s
         # Calculate net APY using the formula
         # Net APY = (Long Overall APY * Leverage) - (Short Overall APY * (Leverage - 1))
         merged_df['net_apy'] = (merged_df['long_overall_apy'] * leverage) - (merged_df['short_overall_apy'] * (leverage - 1))
+
+        # Apply time filtering if specified
+        if time_period_hours is not None:
+            merged_df = filter_dataframe_by_time_window(merged_df, time_period_hours, 'hourBucket')
+
+            if merged_df.empty:
+                return None
 
         # Add metadata
         merged_df['long_token'] = long_token_symbol
